@@ -17,8 +17,28 @@ repositories {
     maven("https://teavm.org/maven/repository")
 }
 
+// CFR classes this project ships patched copies of (src/main/java/org/benf/cfr/...). They are stripped
+// from the CFR jar rather than relying on classpath order: TeaVM puts dependency jars ahead of the
+// project's own classes, so upstream's copy would otherwise win in the JS/WASM build.
+val shadowedCfrClasses = listOf(
+    "org/benf/cfr/reader/util/output/BytecodeTrackingDumper*.class",
+)
+
+val cfrUpstream: Configuration = configurations.create("cfrUpstream") {
+    isTransitive = false
+}
+
+val cfrStripped = tasks.register<Jar>("cfrStripped") {
+    description = "CFR with the classes patched by this project removed."
+    archiveFileName = "cfr-stripped.jar"
+    destinationDirectory = layout.buildDirectory.dir("cfr")
+    from({ cfrUpstream.map { zipTree(it) } })
+    exclude(shadowedCfrClasses)
+}
+
 dependencies {
-    api(libs.cfr)
+    cfrUpstream(libs.cfr)
+    api(files(cfrStripped))
     teavmAnnotationProcessor(libs.teavm.extension.annotation.processor) // hmm?
     testImplementation(platform(libs.junit.bom))
     testImplementation("org.junit.jupiter:junit-jupiter")

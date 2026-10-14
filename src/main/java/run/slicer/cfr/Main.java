@@ -3,6 +3,7 @@ package run.slicer.cfr;
 import org.teavm.jso.*;
 import org.teavm.jso.core.JSMapLike;
 import run.slicer.cfr.impl.ClassFileSourceImpl;
+import run.slicer.cfr.impl.MappingJson;
 import run.slicer.cfr.impl.OutputSinkFactoryImpl;
 import org.benf.cfr.reader.api.CfrDriver;
 import org.teavm.jso.core.JSObjects;
@@ -18,28 +19,50 @@ public class Main {
         return decompile0(names, options == null || JSObjects.isUndefined(options) ? JSObjects.create() : options);
     }
 
+    /**
+     * Like {@link #decompile}, but also collects bytecode offset -> output line mappings.
+     * Resolves to a JSON string (see {@link MappingJson}); the cfr.js wrapper parses it.
+     */
+    @JSExport
+    public static JSPromise<JSString> decompileMapped(String[] names, Options options) {
+        final Options opts = options == null || JSObjects.isUndefined(options) ? JSObjects.create() : options;
+        return JSPromise.callAsync(() -> {
+            final var sinkFactory = run(names, opts, true);
+            return JSString.valueOf(MappingJson.write(sinkFactory.output(), sinkFactory.mappings()));
+        });
+    }
+
     private static JSPromise<JSMapLike<JSString>> decompile0(String[] names, Options options) {
         return JSPromise.callAsync(() -> {
-            final var sinkFactory = new OutputSinkFactoryImpl();
-            new CfrDriver.Builder()
-                    .withClassFileSource(new ClassFileSourceImpl(name0 -> source0(options, name0)))
-                    .withOutputSink(sinkFactory)
-                    .withOptions(options.rawOptions())
-                    .build()
-                    .analyse(List.of(names));
+            final var sinkFactory = run(names, options, false);
 
             final JSMapLike<JSString> output = JSObjects.create();
             for (final var entry : sinkFactory.output().entrySet()) {
                 output.set(entry.getKey(), JSString.valueOf(entry.getValue()));
             }
-
-            // not sure how to get these exceptions across since they can be non-fatal, log them for now
-            for (final Throwable throwable : sinkFactory.exceptions()) {
-                error(JSExceptions.getJSException(throwable));
-            }
-
             return output;
         });
+    }
+
+    private static OutputSinkFactoryImpl run(String[] names, Options options, boolean trackMappings) {
+        final var sinkFactory = new OutputSinkFactoryImpl(trackMappings);
+        final var rawOptions = options.rawOptions();
+        if (trackMappings) {
+            rawOptions.put("trackbytecodeloc", "true");
+        }
+
+        new CfrDriver.Builder()
+                .withClassFileSource(new ClassFileSourceImpl(name0 -> source0(options, name0)))
+                .withOutputSink(sinkFactory)
+                .withOptions(rawOptions)
+                .build()
+                .analyse(List.of(names));
+
+        // not sure how to get these exceptions across since they can be non-fatal, log them for now
+        for (final Throwable throwable : sinkFactory.exceptions()) {
+            error(JSExceptions.getJSException(throwable));
+        }
+        return sinkFactory;
     }
 
     private static byte[] source0(Options options, String name) {

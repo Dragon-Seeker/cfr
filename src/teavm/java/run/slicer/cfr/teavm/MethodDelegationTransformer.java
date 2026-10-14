@@ -10,7 +10,11 @@ import java.util.Set;
 
 public final class MethodDelegationTransformer implements ClassHolderTransformer {
     private final Map<String, Set<String>> DELEGATED_METHODS = Map.of(
-            "java.util.logging.Logger", Set.of("setUseParentHandlers", "addHandler", "setLevel")
+            "java.util.logging.Logger", Set.of(
+                    "setUseParentHandlers", "addHandler", "setLevel",
+                    // CFR runs at Level.WARNING; with setLevel stubbed these would all reach the console
+                    "info", "fine", "finer", "finest"
+            )
     );
 
     @Override

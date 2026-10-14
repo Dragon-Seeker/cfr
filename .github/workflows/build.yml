@@ -1,0 +1,123 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # DecompilationTest runs the built dist/cfr.js under Node. Not Node 22: its V8 keeps optimizing
+      # the WASM-GC module in the background after a decompile (~100 MB/s) and never exits.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # TeaVM JS + WASM-GC build into dist/. TeaVM compiling all of CFR is heavy,
+      # so give the Gradle daemon more than its 512 MB default.
+      - name: Build dist
+        shell: bash
+        run: |
+          set -o pipefail
+          echo "runner: $(nproc) cpus, $(free -m | awk 'NR==2{print $2}') MB RAM"
+          ./gradlew copyDist --stacktrace --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m" \
+            2>&1 | tee build.log
+
+      # Uploaded before tests run, so a test failure still leaves a usable build
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfr-dist-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+
+      # Release the daemon's TeaVM heap before the tests start their own JVMs and Node processes
+      - name: Stop Gradle daemon
+        run: ./gradlew --stop
+
+      # The built dist/ on its own, outside Gradle: decompiles must finish and the process must exit,
+      # with time and peak memory reported per class
+      - name: Node smoke test
+        shell: bash
+        run: |
+          java .github/scripts/DumpClasses.java smoke-classes java/lang/Object java/lang/Thread \
+            'java/lang/Thread$Builder' 'java/lang/Thread$UncaughtExceptionHandler' 'java/lang/Thread$State'
+          run_capped() {
+            sudo -E systemd-run --scope --quiet -p MemoryMax=3G -p MemorySwapMax=0 \
+              --uid="$(id -u)" --gid="$(id -g)" -- env PATH="$PATH" HOME="$HOME" \
+              timeout 3m node .github/scripts/node-smoke.mjs smoke-classes "$@"
+          }
+          status=0
+          run_capped java/lang/Object 2>&1 | grep -v '^ \|^/\*\|^$' | tail -n 3 | tee -a smoke.log || status=1
+          run_capped java/lang/Thread 'java/lang/Thread$Builder' 'java/lang/Thread$UncaughtExceptionHandler' 'java/lang/Thread$State' \
+            2>&1 | grep -v '^ \|^/\*\|^$' | tail -n 3 | tee -a smoke.log || status=1
+          grep -c RESULT smoke.log | grep -q 2 || status=1
+          exit $status
+
+      # Tests run in a memory-capped cgroup: if they blow up, they get OOM-killed inside the cap
+      # and this step fails with its log, instead of the whole runner being shut down.
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          # per-test start/finish events, so a failure points at a test
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/ci-test-events.gradle <<'EOF'
+          allprojects {
+              tasks.withType(Test).configureEach {
+                  testLogging { events "started", "passed", "failed", "skipped"; exceptionFormat "full" }
+              }
+          }
+          EOF
+          ( while sleep 5; do
+              echo "[$(date +%T)] $(free -m | awk 'NR==2{print $3 "/" $2 " MB used"}') | $(ps -eo rss=,comm= --sort=-rss | head -4 | awk '{printf "%s %d MB; ", $2, $1/1024}')"
+            done ) > mem.log &
+          sudo -E systemd-run --scope --quiet -p MemoryMax=5G -p MemorySwapMax=0 \
+            --uid="$(id -u)" --gid="$(id -g)" -- \
+            env PATH="$PATH" HOME="$HOME" JAVA_HOME="$JAVA_HOME" \
+            timeout 15m ./gradlew test --stacktrace --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx1g" \
+            2>&1 | tee test.log
+
+      # Annotations and the step summary stay readable through the API even where raw logs are not
+      - name: Report
+        if: always()
+        shell: bash
+        run: |
+          report() { # title, text
+            { echo "### $1"; echo '```'; echo "$2"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=$1::$(echo "$2" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk 'BEGIN{ORS="%0A"} {print}')"
+          }
+          [ -f build.log ] && report "build" "$(grep -E '^> Task|BUILD|FAIL|rror' build.log | tail -n 30)"
+          [ -f smoke.log ] && report "node smoke" "$(cat smoke.log)"
+          [ -f test.log ] && report "tests" "$(grep -E 'STARTED|PASSED|FAILED|SKIPPED|^> Task|BUILD|Exception|rror' test.log | tail -n 40)"
+          [ -f mem.log ] && report "memory" "$(tail -n 25 mem.log)"
+
+      - name: Upload logs and test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.sha }}
+          path: |
+            build.log
+            smoke.log
+            test.log
+            mem.log
+            build/reports/tests/
+          if-no-files-found: ignore
