@@ -6,7 +6,7 @@ plugins {
     alias(libs.plugins.teavm) // order matters?
 }
 
-val thisVersion = "0.1.8"
+val thisVersion = "0.2.0"
 
 group = "run.slicer"
 version = "$thisVersion-${libs.versions.cfr.get()}"
@@ -102,7 +102,7 @@ tasks {
             file("dist/package.json").writeText(
                 """
                     {
-                      "name": "@run-slicer/cfr",
+                      "name": "@dragon-seeker/cfr",
                       "version": "${project.version}",
                       "description": "A JavaScript port of the CFR decompiler (https://github.com/leibnitz27/cfr).",
                       "main": "cfr.js",
@@ -113,7 +113,11 @@ tasks {
                         "decompilation",
                         "cfr"
                       ],
-                      "author": "run-slicer",
+                      "author": "dragon-seeker (fork of run-slicer/cfr)",
+                      "repository": {
+                        "type": "git",
+                        "url": "git+https://github.com/Dragon-Seeker/cfr.git"
+                      },
                       "license": "MIT"
                     }
                 """.trimIndent()
